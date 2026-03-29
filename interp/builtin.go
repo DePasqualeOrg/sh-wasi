@@ -1048,9 +1048,17 @@ func (r *Runner) readLine(ctx context.Context, raw bool) ([]byte, error) {
 	var line []byte
 	esc := false
 
+	// SetReadDeadline is only available on *os.File; for other readers
+	// (e.g. io.Pipe on WASI), context cancellation will not interrupt
+	// a blocked read, but the read will still complete or error normally.
+	type deadliner interface {
+		SetReadDeadline(time.Time) error
+	}
 	stopc := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
-		r.stdin.SetReadDeadline(time.Now())
+		if d, ok := r.stdin.(deadliner); ok {
+			d.SetReadDeadline(time.Now())
+		}
 		close(stopc)
 	})
 	defer func() {
@@ -1058,7 +1066,9 @@ func (r *Runner) readLine(ctx context.Context, raw bool) ([]byte, error) {
 			// The AfterFunc was started.
 			// Wait for it to complete, and reset the file's deadline.
 			<-stopc
-			r.stdin.SetReadDeadline(time.Time{})
+			if d, ok := r.stdin.(deadliner); ok {
+				d.SetReadDeadline(time.Time{})
+			}
 		}
 	}()
 	for {

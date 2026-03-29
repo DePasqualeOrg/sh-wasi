@@ -1,3 +1,36 @@
+# sh-wasi
+
+Fork of [mvdan/sh](https://github.com/mvdan/sh) (commit `2315483a`, 2026-03-26) for compilation to [WASI](https://wasi.dev).
+
+Provides a shell interpreter that runs as a WebAssembly module. The shell parses and interprets commands internally — pipelines, variable expansion, control flow, etc. all happen inside the Wasm sandbox. External commands can be dispatched through a host function bridge provided by the embedding runtime.
+
+## Why this fork exists
+
+Go's `wasip1` target does not implement `os.Pipe` (as of Go 1.26). Upstream mvdan/sh uses `os.Pipe` for pipelines, heredocs, here-strings, and stdin conversion, so it cannot run on WASI without modification. This fork replaces those calls with `io.Pipe` (pure Go) and adds a non-interactive `cmd/shell` entry point for WASI.
+
+See [docs/wasi-changes.md](docs/wasi-changes.md) for the full list of changes, how to check if the fork is still needed, and how to revert when Go adds `os.Pipe` support on WASI.
+
+## Building for WASI
+
+```bash
+GOOS=wasip1 GOARCH=wasm go build -o shell.wasm -ldflags="-w -s" ./cmd/shell/
+```
+
+Produces a ~5 MB binary (~1.5 MB gzip-compressed).
+
+## Syncing with upstream
+
+```bash
+git fetch https://github.com/mvdan/sh.git master:upstream-main
+git merge upstream-main
+```
+
+---
+
+*The original README follows.*
+
+---
+
 # sh
 
 [![Go Reference](https://pkg.go.dev/badge/mvdan.cc/sh/v3.svg)](https://pkg.go.dev/mvdan.cc/sh/v3)
