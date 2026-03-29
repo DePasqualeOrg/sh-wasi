@@ -46,6 +46,7 @@ func run() error {
 
 	r, err := interp.New(
 		interp.StdIO(os.Stdin, os.Stdout, os.Stderr),
+		interp.ExecHandlers(hostExecHandler),
 		interp.Params(scriptArgs...),
 	)
 	if err != nil {
