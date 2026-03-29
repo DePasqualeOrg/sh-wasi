@@ -95,7 +95,7 @@ type Runner struct {
 	// statHandler is a function responsible for getting file stat. It must be non-nil.
 	statHandler StatHandlerFunc
 
-	stdin  *os.File // e.g. the read end of a pipe
+	stdin  io.Reader // e.g. the read end of a pipe
 	stdout io.Writer
 	stderr io.Writer
 
@@ -148,7 +148,7 @@ type Runner struct {
 	origDir    string
 	origParams []string
 	origOpts   runnerOpts
-	origStdin  *os.File
+	origStdin  io.Reader
 	origStdout io.Writer
 	origStderr io.Writer
 
@@ -508,45 +508,12 @@ func StatHandler(f StatHandlerFunc) RunnerOption {
 	}
 }
 
-func stdinFile(r io.Reader) (*os.File, error) {
-	switch r := r.(type) {
-	case *os.File:
-		return r, nil
-	case nil:
-		return nil, nil
-	default:
-		pr, pw, err := os.Pipe()
-		if err != nil {
-			return nil, err
-		}
-		go func() {
-			io.Copy(pw, r)
-			pw.Close()
-		}()
-		return pr, nil
-	}
-}
-
 // StdIO configures an interpreter's standard input, standard output, and
 // standard error. If out or err are nil, they default to a writer that discards
 // the output.
-//
-// Note that providing a non-nil standard input other than [*os.File] will require
-// an [os.Pipe] and spawning a goroutine to copy into it,
-// as an [os.File] is the only way to share a reader with subprocesses.
-// This may cause the interpreter to consume the entire reader.
-// See [os/exec.Cmd.Stdin].
-//
-// When providing an [*os.File] as standard input, consider using an [os.Pipe]
-// as it has the best chance to support cancellable reads via [os.File.SetReadDeadline],
-// so that cancelling the runner's context can stop a blocked standard input read.
 func StdIO(in io.Reader, out, err io.Writer) RunnerOption {
 	return func(r *Runner) error {
-		stdin, _err := stdinFile(in)
-		if _err != nil {
-			return _err
-		}
-		r.stdin = stdin
+		r.stdin = in
 		if out == nil {
 			out = io.Discard
 		}

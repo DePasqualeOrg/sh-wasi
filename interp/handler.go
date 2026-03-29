@@ -64,11 +64,7 @@ type HandlerContext struct {
 	// It may be invalid if the operation has no relevant position information.
 	Pos syntax.Pos
 
-	// TODO(v4): use an os.File for stdin below directly.
-
 	// Stdin is the interpreter's current standard input reader.
-	// It is always an [*os.File], but the type here remains an [io.Reader]
-	// due to backwards compatibility.
 	Stdin io.Reader
 	// Stdout is the interpreter's current standard output writer.
 	Stdout io.Writer
