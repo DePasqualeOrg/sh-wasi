@@ -38,7 +38,16 @@ func hostExecHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 			}
 		}
 
-		req := marshalRequest(args, stdinData)
+		// Collect the per-command environment (includes inline vars
+		// like PYTHONHOME=/usr/local/bin and exported shell variables).
+		var env []string
+		for name, vr := range hc.Env.Each {
+			if vr.Exported && vr.IsSet() {
+				env = append(env, name+"="+vr.String())
+			}
+		}
+
+		req := marshalRequest(args, env, stdinData)
 
 		respCap := uint32(65536)
 		for {
@@ -74,13 +83,20 @@ func hostExecHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 //
 //	u32 argc
 //	for each arg: u32 len, [len bytes]
+//	u32 envc
+//	for each env: u32 len, [len bytes]   (KEY=VALUE strings)
 //	u32 stdin_len, [stdin_len bytes]
-func marshalRequest(args []string, stdin []byte) []byte {
+func marshalRequest(args []string, env []string, stdin []byte) []byte {
 	var buf bytes.Buffer
 	binary.Write(&buf, binary.LittleEndian, uint32(len(args)))
 	for _, arg := range args {
 		binary.Write(&buf, binary.LittleEndian, uint32(len(arg)))
 		buf.WriteString(arg)
+	}
+	binary.Write(&buf, binary.LittleEndian, uint32(len(env)))
+	for _, e := range env {
+		binary.Write(&buf, binary.LittleEndian, uint32(len(e)))
+		buf.WriteString(e)
 	}
 	binary.Write(&buf, binary.LittleEndian, uint32(len(stdin)))
 	buf.Write(stdin)
