@@ -492,11 +492,14 @@ func (r *Runner) cmd(ctx context.Context, cm syntax.Command) {
 			}
 			r.stdin = pr
 			var wg sync.WaitGroup
-			wg.Go(func() {
+			// TODO: revert to wg.Go() when TinyGo supports sync.WaitGroup.Go
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
 				r2.stmt(ctx, cm.X)
 				r2.exit.exiting = false // subshells don't exit the parent shell
 				pw.Close()
-			})
+			}()
 			r.stmt(ctx, cm.Y)
 			pr.Close()
 			wg.Wait()
