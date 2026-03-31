@@ -64,6 +64,11 @@ type Config struct {
 	// Use [os.ReadDir] to use the filesystem directly.
 	ReadDir2 func(string) ([]fs.DirEntry, error)
 
+	// Stat is used for existence and directory checks during file path globbing.
+	// If nil, globbing falls back to [ReadDir2] for those checks.
+	// Use [os.Stat] to use the filesystem directly.
+	Stat func(string) (fs.FileInfo, error)
+
 	// GlobStar corresponds to the shell option which allows globbing with "**".
 	GlobStar bool
 
@@ -979,12 +984,19 @@ func (cfg *Config) glob(base, pat string) ([]string, error) {
 					match = filepath.Join(base, match)
 				}
 				match = pathJoin2(match, part)
-				// We can't use [Config.ReadDir2] on the parent and match the directory
-				// entry by name, because short paths on Windows break that.
-				// Our only option is to [Config.ReadDir2] on the directory entry itself,
-				// which can be wasteful if we only want to see if it exists,
-				// but at least it's correct in all scenarios.
-				if _, err := cfg.ReadDir2(match); err != nil {
+				if cfg.Stat != nil {
+					info, err := cfg.Stat(match)
+					if err != nil {
+						if errors.Is(err, fs.ErrNotExist) {
+							continue
+						}
+						if wantDir {
+							continue
+						}
+					} else if wantDir && !info.IsDir() {
+						continue
+					}
+				} else if _, err := cfg.ReadDir2(match); err != nil {
 					if isWindowsErrPathNotFound(err) {
 						// Unfortunately, [os.File.Readdir] on a regular file on
 						// Windows returns an error that satisfies [fs.ErrNotExist].
@@ -1084,12 +1096,20 @@ func (cfg *Config) globDir(base, dir string, matcher func(string) bool, wantDir 
 			// No filtering.
 		} else if mode := info.Type(); mode&os.ModeSymlink != 0 {
 			// We need to know if the symlink points to a directory.
-			// This requires an extra syscall, as [Config.ReadDir] on the parent directory
-			// does not follow symlinks for each of the directory entries.
-			// ReadDir is somewhat wasteful here, as we only want its error result,
-			// but we could try to reuse its result as per the TODO in [Config.glob].
-			if _, err := cfg.ReadDir2(filepath.Join(fullDir, info.Name())); err != nil {
-				continue
+			path := filepath.Join(fullDir, info.Name())
+			if cfg.Stat != nil {
+				info, err := cfg.Stat(path)
+				if err != nil || !info.IsDir() {
+					continue
+				}
+			} else {
+				// This requires an extra syscall, as [Config.ReadDir] on the parent directory
+				// does not follow symlinks for each of the directory entries.
+				// ReadDir is somewhat wasteful here, as we only want its error result,
+				// but we could try to reuse its result as per the TODO in [Config.glob].
+				if _, err := cfg.ReadDir2(path); err != nil {
+					continue
+				}
 			}
 		} else if !mode.IsDir() {
 			// Not a symlink nor a directory.
