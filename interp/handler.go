@@ -187,7 +187,15 @@ func checkStat(dir, file string, checkExec bool) (string, error) {
 	if m.IsDir() {
 		return "", fmt.Errorf("is a directory")
 	}
-	if checkExec && runtime.GOOS != "windows" && m&0o111 == 0 {
+	// WASI preview 1 and preview 2 don't expose Unix permission bits.
+	// wasi-libc's stat returns perms=0, and both mainline Go and TinyGo
+	// synthesize a default that doesn't set the executable bit for regular
+	// files (0o600 for files, 0o700 for directories). Gating on 0o111 here
+	// would reject every file in $PATH on WASI — an unrecoverable
+	// false-negative because the perm bits aren't real information.
+	// Defer to the subsequent exec attempt, same rationale as the
+	// windows carve-out above.
+	if checkExec && runtime.GOOS != "windows" && runtime.GOOS != "wasip1" && runtime.GOOS != "wasip2" && m&0o111 == 0 {
 		return "", fmt.Errorf("permission denied")
 	}
 	return file, nil
