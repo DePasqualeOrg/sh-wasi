@@ -44,6 +44,17 @@ func run() error {
 		}
 	}
 
+	// WASI hardcodes the initial working directory to /. When $HOME is
+	// set (e.g. /root), change to it so the shell starts in the user's
+	// workspace. os.Chdir updates wasi-libc's internal CWD without
+	// calling os.Stat, which would fail under TinyGo's WASI preopen
+	// resolution. Remove when WASI preview 2 initial-cwd is available.
+	if home := os.Getenv("HOME"); home != "" {
+		if err := os.Chdir(home); err != nil {
+			fmt.Fprintf(os.Stderr, "shell: could not chdir to $HOME (%s): %v\n", home, err)
+		}
+	}
+
 	r, err := interp.New(
 		interp.StdIO(os.Stdin, os.Stdout, os.Stderr),
 		interp.ExecHandlers(hostExecHandler),
