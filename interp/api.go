@@ -829,7 +829,8 @@ func (r *Runner) Reset() {
 			Str:      strconv.Itoa(os.Getgid()),
 		})
 	}
-	r.setVarString("PWD", r.Dir)
+	// POSIX requires PWD to be exported so child processes can see it.
+	r.setVar("PWD", expand.Variable{Set: true, Exported: true, Kind: expand.String, Str: r.Dir})
 	r.setVarString("IFS", " \t\n")
 	r.setVarString("OPTIND", "1")
 

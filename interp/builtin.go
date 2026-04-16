@@ -1099,8 +1099,9 @@ func (r *Runner) changeDir(ctx context.Context, cmd, path string) uint8 {
 		return 1
 	}
 	r.Dir = apath
-	r.setVarString("OLDPWD", r.envGet("PWD"))
-	r.setVarString("PWD", apath)
+	// POSIX requires PWD and OLDPWD to be exported.
+	r.setVar("OLDPWD", expand.Variable{Set: true, Exported: true, Kind: expand.String, Str: r.envGet("PWD")})
+	r.setVar("PWD", expand.Variable{Set: true, Exported: true, Kind: expand.String, Str: apath})
 	return 0
 }
 
