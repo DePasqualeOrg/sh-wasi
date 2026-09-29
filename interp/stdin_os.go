@@ -6,6 +6,7 @@
 package interp
 
 import (
+	"context"
 	"io"
 	"os"
 
@@ -60,4 +61,10 @@ func stdinTerminal(stdin stdinFile) (int, bool) {
 	}
 	fd := int(stdin.Fd())
 	return fd, term.IsTerminal(fd)
+}
+
+// stageOutput is where a pipeline stage writes. The OS delivers SIGPIPE, or
+// EPIPE, for a real pipe, so the stage writes to it directly.
+func stageOutput(pw *os.File, stop context.CancelFunc) (out io.Writer, isBroken func() bool) {
+	return pw, func() bool { return false }
 }

@@ -6,6 +6,7 @@
 package interp
 
 import (
+	"context"
 	"io"
 	"time"
 )
@@ -54,3 +55,11 @@ func newStdinFile(r io.Reader) (stdinFile, error) {
 
 // stdinTerminal always reports false, as js/wasm and wasip1 have no terminals.
 func stdinTerminal(stdin stdinFile) (int, bool) { return -1, false }
+
+// stageOutput is where a pipeline stage writes. An in-process pipe has no
+// SIGPIPE, so a [sigpipeWriter] stands in for it; isBroken reports whether
+// the stage's own writes broke the pipe.
+func stageOutput(pw *io.PipeWriter, stop context.CancelFunc) (out io.Writer, isBroken func() bool) {
+	w := &sigpipeWriter{w: pw, stop: stop}
+	return w, w.isBroken
+}

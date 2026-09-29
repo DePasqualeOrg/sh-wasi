@@ -195,6 +195,10 @@ type Runner struct {
 
 	lastExpandExit exitStatus // used to surface exit statuses while expanding fields
 
+	// stackBase is where this runner's goroutine stack began, under TinyGo's
+	// Wasm target; see [Runner.enter].
+	stackBase uintptr
+
 	// bgProcs holds all background shells spawned by this runner.
 	// As they run as goroutines rather than forked processes, they have
 	// fake PIDs; see [bgProc.id].
@@ -1301,6 +1305,7 @@ func (r *Runner) subshell(background bool) *Runner {
 		evalDepth:            r.evalDepth,
 		stmtDepth:            r.stmtDepth,
 		procSubstUses:        slices.Clip(r.procSubstUses),
+		stackBase:            r.stackBase,
 
 		origStdout: r.origStdout, // used for process substitutions
 	}
@@ -1311,6 +1316,10 @@ func (r *Runner) subshell(background bool) *Runner {
 	r2.alias = maps.Clone(r.alias)
 
 	r2.dirStack = append(r2.dirBootstrap[:0], r.dirStack...)
+	if background {
+		// It runs on a goroutine stack of its own; see [Runner.enter].
+		r2.stackBase = 0
+	}
 	r2.fillExpandConfig(r.ectx)
 	r2.didReset = true
 	return r2

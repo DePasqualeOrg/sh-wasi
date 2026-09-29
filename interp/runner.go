@@ -314,6 +314,9 @@ func (r *Runner) stmt(ctx context.Context, st *syntax.Stmt) {
 	if r.stop(ctx) {
 		return
 	}
+	if !r.enter() {
+		return
+	}
 	if r.stmtDepth >= maxStmtDepth {
 		r.exit.fatal(fmt.Errorf("statement nesting is deeper than %d levels", maxStmtDepth))
 		return
@@ -581,24 +584,43 @@ func (r *Runner) cmd(ctx context.Context, cm syntax.Command) {
 				r.exit.fatal(err) // not being able to create a pipe is rare but critical
 				return
 			}
+			xctx, stopX := context.WithCancel(ctx)
+			out, isBroken := stageOutput(pw, stopX)
 			r2 := r.subshell(true)
-			r2.stdout = pw
+			// Stopping the stage stops its expansions too.
+			r2.fillExpandConfig(xctx)
+			r2.stdout = out
 			if cm.Op == syntax.PipeAll {
-				r2.stderr = pw
+				r2.stderr = out
 			} else {
 				r2.stderr = r.stderr
 			}
 			oldIn := r.stdin
 			r.stdin = pr
 			var wg sync.WaitGroup
+			var broken bool
 			wg.Go(func() {
-				r2.stmt(ctx, cm.X)
+				r2.stmt(xctx, cm.X)
 				r2.exitSubshell()
+				// Once the write end is closed, a background job's writes
+				// fail as if the reader had finished, so the stage counts as
+				// broken only if its pipe broke while it ran. A job the stage
+				// started in the background shares that pipe, and so does
+				// its broken pipe.
+				broken = isBroken()
 				pw.Close()
 			})
 			r.stmt(ctx, cm.Y)
 			pr.Close()
 			wg.Wait()
+			// This also stops any job the stage started in the background.
+			stopX()
+			if broken && ctx.Err() == nil {
+				// The writer stopped as if killed by SIGPIPE: 128 + 13. Its
+				// status after the failed write is moot, as bash's writer
+				// would not have lived to set one.
+				r2.exit = exitStatus{code: 141}
+			}
 			r.stdin = oldIn
 			if r.opts[optPipeFail] && !r2.exit.ok() && r.exit.ok() {
 				r.exit = r2.exit
@@ -1341,6 +1363,9 @@ func (r *Runner) call(ctx context.Context, pos syntax.Pos, args []string) {
 	name := args[0]
 	if body := r.Funcs[name]; body != nil {
 		r.reportBgStart(0) // not one external program
+		if !r.enter() {
+			return
+		}
 		if !r.enterCall(name, &r.callDepth) {
 			return
 		}
@@ -1428,4 +1453,87 @@ func (r *Runner) lstat(ctx context.Context, name string) (fs.FileInfo, error) {
 func (r *Runner) access(ctx context.Context, name string, mode AccessMode) error {
 	path := absPath(r.Dir, name)
 	return r.accessHandler(r.handlerCtx(ctx, handlerKindAccess, todoPos), path, mode)
+}
+
+// enter checks that a statement or function call has stack left to run in.
+// Once it has not, it acts as `exit 1` would: the script stops, while a
+// subshell or command substitution ends only itself. The WASI build runs each
+// goroutine on a small fixed stack with no guard page, so recursing past its
+// end would corrupt memory before the runtime noticed.
+func (r *Runner) enter() bool {
+	if r.stackExhausted() {
+		r.errf("statements nested too deeply\n")
+		// Replace the whole status: an error the previous statement left
+		// would otherwise become the script's exit status.
+		r.exit = exitStatus{code: 1, exiting: true}
+		return false
+	}
+	return true
+}
+
+// pipeCapacity is what a kernel pipe buffers. io.Pipe buffers nothing, so
+// output up to this size that the reader never read is taken as delivered,
+// as it would be in bash, and only more than that counts as a broken pipe.
+const pipeCapacity = 64 * 1024
+
+// sigpipeWriter stands in for SIGPIPE, which WASI lacks. Once the reader has
+// finished and more than pipeCapacity of the shell's own output has gone
+// unread, it cancels the writing side's context, so that stage stops before
+// its next statement instead of running on, as
+// `while true; do echo y; done | { read -r l; }` otherwise would forever. An
+// exec handler writing an external command's output uses WriteExternal
+// instead, because SIGPIPE ends only the process that wrote.
+type sigpipeWriter struct {
+	w    io.Writer
+	stop context.CancelFunc
+
+	// mu guards the fields below: with `|&`, an external command's stdout
+	// and stderr may be copied into the writer concurrently.
+	mu         sync.Mutex
+	readerGone bool
+	unread     int
+	broken     bool
+}
+
+func (s *sigpipeWriter) isBroken() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.broken
+}
+
+func (s *sigpipeWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, err := s.write(p)
+	if errors.Is(err, io.ErrClosedPipe) {
+		s.broken = true
+		s.stop()
+	}
+	return n, err
+}
+
+// WriteExternal writes on behalf of an external command without stopping the
+// stage when the reader has finished; the handler reports that command's own
+// broken pipe.
+func (s *sigpipeWriter) WriteExternal(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.write(p)
+}
+
+func (s *sigpipeWriter) write(p []byte) (int, error) {
+	written := 0
+	if !s.readerGone {
+		n, err := s.w.Write(p)
+		if !errors.Is(err, io.ErrClosedPipe) {
+			return n, err
+		}
+		s.readerGone = true
+		written = n
+	}
+	s.unread += len(p) - written
+	if s.unread > pipeCapacity {
+		return written, io.ErrClosedPipe
+	}
+	return len(p), nil
 }
