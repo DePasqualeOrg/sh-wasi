@@ -1,7 +1,7 @@
 // Copyright (c) 2017, Daniel Martí <mvdan@mvdan.cc>
 // See LICENSE for licensing information
 
-//go:build js
+//go:build js || wasip1
 
 package interp
 
@@ -10,14 +10,14 @@ import (
 	"time"
 )
 
-// js/wasm has no OS pipes and no subprocesses, so pipes are in-process
+// js/wasm and wasip1 have no OS pipes and no subprocesses, so pipes are in-process
 // [io.Pipe]s and any reader can be used as stdin directly. Read
 // deadlines are not supported: SetReadDeadline is a no-op, so a
 // blocked `read` builtin unblocks on the next write rather than on
 // context cancellation.
 
 // stdinFile is the runner's standard input; elsewhere it is an
-// [*os.File], but on js/wasm any reader satisfying this interface works.
+// [*os.File], but on js/wasm and wasip1 any reader satisfying this interface works.
 type stdinFile interface {
 	io.ReadCloser
 	SetReadDeadline(t time.Time) error
@@ -52,5 +52,5 @@ func newStdinFile(r io.Reader) (stdinFile, error) {
 	return jsReader{r}, nil
 }
 
-// stdinTerminal always reports false, as js/wasm has no terminals.
+// stdinTerminal always reports false, as js/wasm and wasip1 have no terminals.
 func stdinTerminal(stdin stdinFile) (int, bool) { return -1, false }

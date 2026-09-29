@@ -1,7 +1,7 @@
 // Copyright (c) 2017, Daniel Martí <mvdan@mvdan.cc>
 // See LICENSE for licensing information
 
-//go:build !js
+//go:build !js && !wasip1
 
 package interp
 
