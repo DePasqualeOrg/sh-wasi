@@ -1,5 +1,6 @@
 *.a
 *.zip
+*.wasm
 
 # Don't store any of this in the master branch.
 suppressions/
