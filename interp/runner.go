@@ -314,9 +314,6 @@ func (r *Runner) stmt(ctx context.Context, st *syntax.Stmt) {
 	if r.stop(ctx) {
 		return
 	}
-	if !r.enter() {
-		return
-	}
 	if r.stmtDepth >= maxStmtDepth {
 		r.exit.fatal(fmt.Errorf("statement nesting is deeper than %d levels", maxStmtDepth))
 		return
@@ -1363,9 +1360,6 @@ func (r *Runner) call(ctx context.Context, pos syntax.Pos, args []string) {
 	name := args[0]
 	if body := r.Funcs[name]; body != nil {
 		r.reportBgStart(0) // not one external program
-		if !r.enter() {
-			return
-		}
 		if !r.enterCall(name, &r.callDepth) {
 			return
 		}
@@ -1455,22 +1449,6 @@ func (r *Runner) access(ctx context.Context, name string, mode AccessMode) error
 	return r.accessHandler(r.handlerCtx(ctx, handlerKindAccess, todoPos), path, mode)
 }
 
-// enter checks that a statement or function call has stack left to run in.
-// Once it has not, it acts as `exit 1` would: the script stops, while a
-// subshell or command substitution ends only itself. The WASI build runs each
-// goroutine on a small fixed stack with no guard page, so recursing past its
-// end would corrupt memory before the runtime noticed.
-func (r *Runner) enter() bool {
-	if r.stackExhausted() {
-		r.errf("statements nested too deeply\n")
-		// Replace the whole status: an error the previous statement left
-		// would otherwise become the script's exit status.
-		r.exit = exitStatus{code: 1, exiting: true}
-		return false
-	}
-	return true
-}
-
 // pipeCapacity is what a kernel pipe buffers. io.Pipe buffers nothing, so
 // output up to this size that the reader never read is taken as delivered,
 // as it would be in bash, and only more than that counts as a broken pipe.
@@ -1487,8 +1465,9 @@ type sigpipeWriter struct {
 	w    io.Writer
 	stop context.CancelFunc
 
-	// mu guards the fields below: with `|&`, an external command's stdout
-	// and stderr may be copied into the writer concurrently.
+	// mu guards the fields below: a job started in the background shares
+	// the writer with the rest of its stage, and a write into the pipe
+	// blocks mid-call until the reader takes it.
 	mu         sync.Mutex
 	readerGone bool
 	unread     int

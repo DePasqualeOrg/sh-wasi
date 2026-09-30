@@ -63,8 +63,10 @@ func stdinTerminal(stdin stdinFile) (int, bool) {
 	return fd, term.IsTerminal(fd)
 }
 
-// stageOutput is where a pipeline stage writes. The OS delivers SIGPIPE, or
-// EPIPE, for a real pipe, so the stage writes to it directly.
+// stageOutput is where a pipeline stage writes. An OS pipe reports a
+// finished reader itself, with SIGPIPE to a child process that writes to it
+// and EPIPE to this one, since Go ignores SIGPIPE on such descriptors, so the
+// stage writes to it directly.
 func stageOutput(pw *os.File, stop context.CancelFunc) (out io.Writer, isBroken func() bool) {
 	return pw, func() bool { return false }
 }

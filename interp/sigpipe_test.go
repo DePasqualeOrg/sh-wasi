@@ -42,7 +42,7 @@ func TestSigpipeWriterBuffersAPipesWorth(t *testing.T) {
 func TestPipelineStandsInForSigpipe(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS != "js" && runtime.GOOS != "wasip1" {
-		t.Skip("pipes here are OS pipes, which deliver SIGPIPE themselves")
+		t.Skip("pipes here are OS pipes, which report a finished reader themselves")
 	}
 	src := `set -o pipefail
 printf 'a\nb\n' | { read -r l; }; echo "small:$?"
