@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"mvdan.cc/sh/v3/expand"
@@ -86,9 +87,9 @@ type hostConn struct {
 }
 
 // hostConnFree keeps a few idle connections, so a loop that runs many small
-// commands does not allocate two chunks for each. It is bounded because
-// TinyGo's sync.Pool is never drained: a pipeline of many external stages
-// would otherwise leave all their buffers in it for the rest of the call.
+// commands does not allocate two chunks for each. It is bounded so that a
+// pipeline of many external stages does not leave all their buffers idle for
+// the rest of the call.
 var hostConnFree struct {
 	sync.Mutex
 	conns []*hostConn
@@ -175,28 +176,29 @@ func (c *hostConn) begin(args, env []string) (uint32, error) {
 
 // sendStdin streams r to the host until EOF or until the host has enough.
 // Each request carries a full chunk unless the input ends, so a producer that
-// writes a line at a time does not cost a host call per line.
-func (c *hostConn) sendStdin(handle uint32, r io.Reader) error {
+// writes a line at a time does not cost a host call per line. readErr is a
+// failed read of r, and err a failed call to the host.
+func (c *hostConn) sendStdin(handle uint32, r io.Reader) (readErr, err error) {
 	for {
 		c.start(opStdin)
 		c.u32(handle)
 		header := len(c.req)
-		n, err := io.ReadFull(r, c.req[header:header+chunkSize])
+		n, readErr := io.ReadFull(r, c.req[header:header+chunkSize])
 		if n > 0 {
 			c.req = c.req[:header+n]
-			more, callErr := c.callU32()
-			if callErr != nil {
-				return callErr
+			more, err := c.callU32()
+			if err != nil {
+				return nil, err
 			}
 			if more == 0 {
-				return nil
+				return nil, nil
 			}
 		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			return nil, nil
 		}
-		if err != nil {
-			return fmt.Errorf("reading stdin: %w", err)
+		if readErr != nil {
+			return readErr, nil
 		}
 	}
 }
@@ -215,9 +217,8 @@ type externalWriter interface {
 
 // copyStream writes one of the command's output streams to w. A failed write
 // stops the copy, and the host drops the rest of the stream when the command
-// ends. It reports whether the write failed because w is a pipe whose reader
-// has finished, which would have killed a real process with SIGPIPE.
-func (c *hostConn) copyStream(handle, stream uint32, w io.Writer) (brokenPipe bool, err error) {
+// ends; writeErr is that write's error, and err a failed call to the host.
+func (c *hostConn) copyStream(handle, stream uint32, w io.Writer) (writeErr, err error) {
 	write := w.Write
 	if ew, ok := w.(externalWriter); ok {
 		write = ew.WriteExternal
@@ -228,13 +229,13 @@ func (c *hostConn) copyStream(handle, stream uint32, w io.Writer) (brokenPipe bo
 		c.u32(stream)
 		chunk, err := c.call()
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		if len(chunk) == 0 {
-			return false, nil
+			return nil, nil
 		}
 		if _, err := write(chunk); err != nil {
-			return errors.Is(err, io.ErrClosedPipe), nil
+			return err, nil
 		}
 	}
 }
@@ -254,31 +255,47 @@ func hostExecHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 
 		c := getHostConn()
 		defer putHostConn(c)
-		handle, err := c.begin(args, exportedEnv(hc.Env))
+		handle, err := c.begin(args, exportedEnv(hc.Env, hc.Dir))
 		if err != nil {
 			return err
 		}
 		defer c.end(handle)
 
 		if hc.Stdin != nil {
-			if err := c.sendStdin(handle, hc.Stdin); err != nil {
+			readErr, err := c.sendStdin(handle, hc.Stdin)
+			if err != nil {
 				return err
+			}
+			if readErr != nil {
+				// The command would have failed to read its own input; it
+				// does not run, and the script goes on.
+				fmt.Fprintf(hc.Stderr, "%s: read error: %v\n", args[0], withoutPath(readErr))
+				return interp.ExitStatus(1)
 			}
 		}
 		code, err := c.run(handle)
 		if err != nil {
 			return err
 		}
-		stdoutBroken, err := c.copyStream(handle, streamStdout, hc.Stdout)
+		stdoutErr, err := c.copyStream(handle, streamStdout, hc.Stdout)
 		if err != nil {
 			return err
 		}
-		stderrBroken, err := c.copyStream(handle, streamStderr, hc.Stderr)
+		stderrErr, err := c.copyStream(handle, streamStderr, hc.Stderr)
 		if err != nil {
 			return err
 		}
-		if stdoutBroken || stderrBroken {
-			// As if SIGPIPE had killed the command: 128 + 13.
+		for _, writeErr := range []error{stdoutErr, stderrErr} {
+			if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
+				// The command has ended, so report the lost output as a
+				// command that wrote it itself would.
+				fmt.Fprintf(hc.Stderr, "%s: write error: %v\n", args[0], withoutPath(writeErr))
+				return interp.ExitStatus(1)
+			}
+		}
+		if stdoutErr != nil || stderrErr != nil {
+			// A pipe whose reader has finished, which would have killed the
+			// command with SIGPIPE: 128 + 13.
 			return interp.ExitStatus(141)
 		}
 		// As in bash, only the low 8 bits of the status survive, so 256 is
@@ -290,13 +307,98 @@ func hostExecHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	}
 }
 
+// openHandler opens /dev/null as a null device, and /dev/stdin, /dev/stdout
+// and /dev/stderr as the shell's current standard streams. The runtime's
+// /dev holds only an ordinary file named null, so a redirect to /dev/null
+// would keep what was written and read it back later in the call, and one to
+// /dev/stderr would write a stray file. The name resolves as the default
+// handler resolves it, so `null` in /dev and `/dev//null` count too.
+func openHandler() interp.OpenHandlerFunc {
+	open := interp.DefaultOpenHandler()
+	return func(ctx context.Context, name string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {
+		hc := interp.HandlerCtx(ctx)
+		resolved := name
+		if resolved != "" && !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(hc.Dir, resolved)
+		}
+		switch filepath.Clean(resolved) {
+		case "/dev/null":
+			return devNull{}, nil
+		case "/dev/stdin":
+			if hc.Stdin != nil {
+				return stdStream{Reader: hc.Stdin, Writer: devNull{}}, nil
+			}
+			return devNull{}, nil
+		case "/dev/stdout":
+			if hc.Stdout != nil {
+				return stdStream{Reader: devNull{}, Writer: hc.Stdout}, nil
+			}
+			return devNull{}, nil
+		case "/dev/stderr":
+			if hc.Stderr != nil {
+				return stdStream{Reader: devNull{}, Writer: hc.Stderr}, nil
+			}
+			return devNull{}, nil
+		}
+		return open(ctx, name, flag, perm)
+	}
+}
+
+type devNull struct{}
+
+func (devNull) Read([]byte) (int, error)    { return 0, io.EOF }
+func (devNull) Write(p []byte) (int, error) { return len(p), nil }
+func (devNull) Close() error                { return nil }
+
+// stdStream is one of the shell's standard streams opened by name. Closing it
+// leaves the stream open, as closing a duplicated descriptor would, and an
+// external command writing through it breaks a pipe as it would writing to
+// the stream directly.
+type stdStream struct {
+	io.Reader
+	io.Writer
+}
+
+func (stdStream) Close() error { return nil }
+
+func (s stdStream) WriteExternal(p []byte) (int, error) {
+	if ew, ok := s.Writer.(externalWriter); ok {
+		return ew.WriteExternal(p)
+	}
+	return s.Write(p)
+}
+
 // exportedEnv collects the per-command environment, including inline
-// assignments such as PYTHONHOME=/usr/local/bin and exported shell variables.
-func exportedEnv(env expand.Environ) []string {
-	var pairs []string
+// assignments such as PYTHONHOME=/usr/local/bin and exported shell variables,
+// with PWD set to dir: a command enters the directory PWD names, so it
+// follows the shell's directory whatever a script did to the variable.
+//
+// env yields a scope's variables after its parent's, so the last entry of a
+// name is the variable's current state, as lookups see it: a script's unset,
+// or a change that leaves the variable unexported or not a string, keeps an
+// inherited value from the command. As in interp's execEnv, and Bash, a local
+// variable without a value does not hide an outer one.
+func exportedEnv(env expand.Environ, dir string) []string {
+	values := map[string]string{}
+	seen := map[string]bool{}
+	var names []string
 	for name, vr := range env.Each {
-		if vr.Exported && vr.IsSet() {
-			pairs = append(pairs, name+"="+vr.String())
+		switch {
+		case name == "PWD", !vr.IsSet() && vr.Local:
+		case vr.IsSet() && vr.Exported && vr.Kind == expand.String:
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+			values[name] = vr.String()
+		default:
+			delete(values, name)
+		}
+	}
+	pairs := []string{"PWD=" + dir}
+	for _, name := range names {
+		if value, ok := values[name]; ok {
+			pairs = append(pairs, name+"="+value)
 		}
 	}
 	return pairs
@@ -308,9 +410,10 @@ const maxShellNesting = 16
 
 type nestingKey struct{}
 
-// startNestedShell runs a nested shell on a goroutine of its own, which gives
-// it a fresh stack, as a separate process would have. The interpreter
-// recurses through nested statements, and the shell's stack is small.
+// startNestedShell runs a nested shell on a goroutine of its own, as a
+// separate process would run on its own stack. Go on Wasm unwinds the native
+// Wasm stack whenever a goroutine blocks, so the nested shell's recursion
+// does not add to the depth of the caller's.
 func startNestedShell(ctx context.Context, hc interp.HandlerContext, args []string) error {
 	depth, _ := ctx.Value(nestingKey{}).(int)
 	if depth >= maxShellNesting {
@@ -443,17 +546,19 @@ options:
 	r, err := interp.New(
 		interp.StdIO(hc.Stdin, pipe.wrap(hc.Stdout), pipe.wrap(hc.Stderr)),
 		interp.ExecHandlers(hostExecHandler),
-		interp.Env(expand.ListEnviron(exportedEnv(hc.Env)...)),
+		interp.OpenHandler(openHandler()),
+		interp.Env(expand.ListEnviron(exportedEnv(hc.Env, hc.Dir)...)),
 		interp.Params(append(append(opts, "--"), params...)...),
+		// Take the calling interpreter's directory as it is, as a child
+		// process inherits its parent's: the Dir option, or none, would stat
+		// it or the process's start directory, and fail if either is gone.
+		func(r *interp.Runner) error { r.Dir = hc.Dir; return nil },
 	)
 	if err != nil {
 		return fail(2, "%v", err)
 	}
-	// Set the directory directly: the Dir option stats the path, which
-	// TinyGo's WASI preopen resolution can refuse (see main.go).
-	r.Dir = hc.Dir
 	err = r.Run(ctx, file)
-	if pipe.broken && parent.Err() == nil {
+	if pipe.broken.Load() && parent.Err() == nil {
 		// As if SIGPIPE had killed the child: 128 + 13.
 		return interp.ExitStatus(141)
 	}
@@ -469,8 +574,10 @@ options:
 // childPipe is a nested shell's SIGPIPE: the shell's writes into a pipeline
 // stage stop the nested shell once the stage's reader has finished.
 type childPipe struct {
-	stop   context.CancelFunc
-	broken bool
+	stop context.CancelFunc
+	// Set by whichever goroutine's write found the pipe closed, including a
+	// background job's.
+	broken atomic.Bool
 }
 
 // wrap returns w with the nested shell's own writes routed through the
@@ -490,7 +597,7 @@ type childPipeWriter struct {
 func (c childPipeWriter) Write(p []byte) (int, error) {
 	n, err := c.w.WriteExternal(p)
 	if errors.Is(err, io.ErrClosedPipe) {
-		c.pipe.broken = true
+		c.pipe.broken.Store(true)
 		c.pipe.stop()
 	}
 	return n, err

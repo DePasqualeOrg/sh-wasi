@@ -8,8 +8,11 @@ See [docs/wasi-changes.md](docs/wasi-changes.md) for the changes from upstream a
 
 ## Building for WASI
 
+Build the shell with the correction to Go's wasip1 `syscall` package that `scripts/go-wasip1-overlay.sh` writes; without it the shell resolves some relative paths into the wrong mount. See [docs/wasi-changes.md](docs/wasi-changes.md).
+
 ```bash
-GOOS=wasip1 GOARCH=wasm go build -o shell.wasm -ldflags="-w -s" ./cmd/shell/
+overlay="$(scripts/go-wasip1-overlay.sh "$(mktemp -d)")"
+GOOS=wasip1 GOARCH=wasm go build -overlay="$overlay" -o shell.wasm -ldflags="-w -s" ./cmd/shell/
 ```
 
 ---

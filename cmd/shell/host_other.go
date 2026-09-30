@@ -8,3 +8,7 @@ import "mvdan.cc/sh/v3/interp"
 func hostExecHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return next
 }
+
+func openHandler() interp.OpenHandlerFunc {
+	return interp.DefaultOpenHandler()
+}
